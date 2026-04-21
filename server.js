@@ -41,18 +41,20 @@ app.post('/crear-checkout', async (req, res) => {
     const shopifyStore = 'pfueck-wm.myshopify.com';
     const storefrontToken = '4c5d8f6909eccf2964cbb97e0ee2187e';
 
+    // Cart API (checkoutCreate fue deprecated en 2024)
+    const buyerIdentity = email ? `, buyerIdentity: { email: "${email}" }` : '';
     const query = `
       mutation {
-        checkoutCreate(input: {
-          lineItems: [{ variantId: "gid://shopify/ProductVariant/${variantId}", quantity: 1 }]
-          ${email ? `email: "${email}"` : ''}
+        cartCreate(input: {
+          lines: [{ merchandiseId: "gid://shopify/ProductVariant/${variantId}", quantity: 1 }]
+          ${buyerIdentity}
         }) {
-          checkout { webUrl }
-          checkoutUserErrors { message }
+          cart { checkoutUrl }
+          userErrors { message }
         }
       }`;
 
-    const response = await fetch(`https://${shopifyStore}/api/2024-01/graphql.json`, {
+    const response = await fetch(`https://${shopifyStore}/api/2024-10/graphql.json`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -62,17 +64,19 @@ app.post('/crear-checkout', async (req, res) => {
     });
 
     const data = await response.json();
-    const checkout = data?.data?.checkoutCreate?.checkout;
-    const errors  = data?.data?.checkoutCreate?.checkoutUserErrors;
+    const checkoutUrl = data?.data?.cartCreate?.cart?.checkoutUrl;
+    const errors      = data?.data?.cartCreate?.userErrors;
 
     if (errors && errors.length > 0) {
+      console.error('Cart API errors:', errors);
       return res.status(400).json({ error: errors[0].message });
     }
-    if (!checkout?.webUrl) {
-      return res.status(500).json({ error: 'No se pudo generar el checkout' });
+    if (!checkoutUrl) {
+      console.error('Cart API raw response:', JSON.stringify(data));
+      return res.status(500).json({ error: 'No se pudo generar el checkout', detail: data });
     }
 
-    res.json({ checkoutUrl: checkout.webUrl });
+    res.json({ checkoutUrl });
 
   } catch (err) {
     console.error('Error crear-checkout:', err);
