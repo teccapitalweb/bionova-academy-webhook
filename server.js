@@ -88,6 +88,59 @@ app.options('/crear-checkout', (req, res) => {
   res.sendStatus(200);
 });
 
+// ══ CANCELAR MEMBRESÍA ════════════════════════════════════════════════
+// El socio puede cancelar su suscripción desde el portal
+app.post('/cancelar-membresia', async (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+
+  try {
+    const { uid, email, motivo } = req.body;
+    if (!uid && !email) {
+      return res.status(400).json({ error: 'Se requiere uid o email' });
+    }
+
+    // Localizar al miembro en Firestore
+    let memberDoc;
+    if (uid) {
+      memberDoc = await db.collection('miembros').doc(uid).get();
+    } else {
+      const query = await db.collection('miembros').where('email', '==', email.toLowerCase().trim()).limit(1).get();
+      if (!query.empty) memberDoc = query.docs[0];
+    }
+
+    if (!memberDoc || !memberDoc.exists) {
+      return res.status(404).json({ error: 'Miembro no encontrado' });
+    }
+
+    // Actualizar estado a "cancelado" (mantiene acceso hasta que venza)
+    await memberDoc.ref.update({
+      estado: 'cancelado',
+      fechaCancelacion: new Date().toISOString(),
+      motivoCancelacion: motivo || 'No especificado',
+      renovacionAutomatica: false
+    });
+
+    console.log('📋 Membresía cancelada:', memberDoc.data().email, '| Motivo:', motivo || '—');
+    res.json({
+      success: true,
+      message: 'Membresía cancelada. Mantienes acceso hasta tu fecha de vencimiento.',
+      vence: memberDoc.data().vence || null
+    });
+
+  } catch (err) {
+    console.error('❌ Error cancelar-membresia:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.options('/cancelar-membresia', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.sendStatus(200);
+});
+
 // ══ WEBHOOK SHOPIFY — ORDERS/PAID ════════════════════════════════════
 app.post('/webhook/shopify', async (req, res) => {
   try {
