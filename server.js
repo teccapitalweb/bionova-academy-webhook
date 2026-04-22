@@ -33,7 +33,7 @@ app.post('/crear-checkout', async (req, res) => {
   res.header('Access-Control-Allow-Headers', 'Content-Type');
 
   try {
-    const { variantId, email } = req.body;
+    const { variantId, email, sellingPlanId } = req.body;
     if (!variantId) {
       return res.status(400).json({ error: 'variantId requerido' });
     }
@@ -41,12 +41,19 @@ app.post('/crear-checkout', async (req, res) => {
     const shopifyStore = 'pfueck-wm.myshopify.com';
     const storefrontToken = '4c5d8f6909eccf2964cbb97e0ee2187e';
 
-    // Cart API (checkoutCreate fue deprecated en 2024)
+    // Cart API con sellingPlanId para suscripciones + email pre-rellenado
+    const sellingPlanPart = sellingPlanId
+      ? `, sellingPlanId: "gid://shopify/SellingPlan/${sellingPlanId}"`
+      : '';
     const buyerIdentity = email ? `, buyerIdentity: { email: "${email}" }` : '';
     const query = `
       mutation {
         cartCreate(input: {
-          lines: [{ merchandiseId: "gid://shopify/ProductVariant/${variantId}", quantity: 1 }]
+          lines: [{
+            merchandiseId: "gid://shopify/ProductVariant/${variantId}",
+            quantity: 1
+            ${sellingPlanPart}
+          }]
           ${buyerIdentity}
         }) {
           cart { checkoutUrl }
@@ -76,6 +83,7 @@ app.post('/crear-checkout', async (req, res) => {
       return res.status(500).json({ error: 'No se pudo generar el checkout', detail: data });
     }
 
+    console.log('✅ Checkout creado:', email || 'sin-email', '→', checkoutUrl);
     res.json({ checkoutUrl });
 
   } catch (err) {
