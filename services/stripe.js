@@ -39,11 +39,7 @@ export async function handleCheckoutCompleted(session) {
     } catch (e) { console.warn('⚠️  No se pudo resolver customer por email:', e.message); }
   }
   if (!subscriptionId && customerId) {
-    try {
-      const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 10 });
-      const bio = subs.data.find(s => (s.metadata?.source || '') === SOURCE) || subs.data[0];
-      if (bio) subscriptionId = bio.id;
-    } catch (e) { console.warn('⚠️  No se pudo resolver subscription por customer:', e.message); }
+    subscriptionId = await subIdBionovaDeCustomer(customerId) || subscriptionId;
   }
 
   if (!uid && !email) {
@@ -180,6 +176,28 @@ export async function retrieveSession(sessionId) {
 
 // helper a prueba de balas: localiza el subId de un miembro;
 // si no lo tiene guardado, lo busca en Stripe por customerId.
+// ¿Esta suscripción es de BioNova? Por etiqueta source O por su precio.
+// (La cuenta de Stripe es compartida entre consultoras; con cupón 100% el
+//  metadata.source puede no quedar, así que el precio es el identificador firme.)
+function esSubBionova(s) {
+  if ((s.metadata?.source || '') === SOURCE) return true;
+  const ids = [STRIPE_CONFIG.priceMensual, STRIPE_CONFIG.priceAnual].filter(Boolean);
+  return (s.items?.data || []).some(it => ids.includes(it.price?.id));
+}
+
+async function subIdBionovaDeCustomer(customerId) {
+  if (!customerId) return null;
+  try {
+    const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 20 });
+    const vivas = subs.data.filter(s => !['canceled', 'incomplete_expired'].includes(s.status));
+    const bio = vivas.find(esSubBionova) || subs.data.find(esSubBionova) || vivas[0] || null;
+    return bio ? bio.id : null;
+  } catch (e) {
+    console.warn('⚠️  No se pudo listar suscripciones por customer:', e.message);
+    return null;
+  }
+}
+
 async function resolverSubId(data) {
   let subId = data.stripeSubscriptionId || data.subscriptionId || null;
   if (subId) return subId;
@@ -193,19 +211,7 @@ async function resolverSubId(data) {
       console.warn('⚠️  No se pudo resolver customer por email:', e.message);
     }
   }
-  if (customerId) {
-    try {
-      const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 10 });
-      // En cuenta compartida, prioriza la suscripción de BioNova.
-      const bio = subs.data.find(x => (x.metadata?.source || '') === SOURCE && x.status !== 'canceled')
-               || subs.data.find(x => x.status !== 'canceled')
-               || subs.data[0];
-      if (bio) subId = bio.id;
-    } catch (e) {
-      console.warn('⚠️  No se pudo listar suscripciones por customer:', e.message);
-    }
-  }
-  return subId;
+  return await subIdBionovaDeCustomer(customerId);
 }
 
 // ───────────────────────────────────────────────────────────────
