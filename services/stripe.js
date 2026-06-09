@@ -26,9 +26,25 @@ export async function handleCheckoutCompleted(session) {
 
   const uid = session.client_reference_id || session.metadata?.uid;
   const email = session.customer_email || session.customer_details?.email;
-  const customerId = session.customer;
-  const subscriptionId = session.subscription;
+  let customerId = session.customer;
+  let subscriptionId = session.subscription;
   const plan = session.metadata?.plan || 'desconocido';
+
+  // Cupón 100% / total $0: el evento puede llegar SIN customer/subscription.
+  // Los resolvemos desde Stripe para poder cancelar después.
+  if (!customerId && email) {
+    try {
+      const cust = await stripe.customers.list({ email: email.toLowerCase(), limit: 1 });
+      if (cust.data.length) customerId = cust.data[0].id;
+    } catch (e) { console.warn('⚠️  No se pudo resolver customer por email:', e.message); }
+  }
+  if (!subscriptionId && customerId) {
+    try {
+      const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 10 });
+      const bio = subs.data.find(s => (s.metadata?.source || '') === SOURCE) || subs.data[0];
+      if (bio) subscriptionId = bio.id;
+    } catch (e) { console.warn('⚠️  No se pudo resolver subscription por customer:', e.message); }
+  }
 
   if (!uid && !email) {
     console.warn('⚠️  Checkout sin uid ni email · session:', session.id);
@@ -167,11 +183,24 @@ export async function retrieveSession(sessionId) {
 async function resolverSubId(data) {
   let subId = data.stripeSubscriptionId || data.subscriptionId || null;
   if (subId) return subId;
-  const customerId = data.stripeCustomerId || data.customerId;
+  let customerId = data.stripeCustomerId || data.customerId;
+  // Sin customer guardado (p.ej. activado con cupón 100%): búscalo por email.
+  if (!customerId && data.email) {
+    try {
+      const cust = await stripe.customers.list({ email: data.email, limit: 1 });
+      if (cust.data.length) customerId = cust.data[0].id;
+    } catch (e) {
+      console.warn('⚠️  No se pudo resolver customer por email:', e.message);
+    }
+  }
   if (customerId) {
     try {
-      const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 1 });
-      if (subs.data.length) subId = subs.data[0].id;
+      const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 10 });
+      // En cuenta compartida, prioriza la suscripción de BioNova.
+      const bio = subs.data.find(x => (x.metadata?.source || '') === SOURCE && x.status !== 'canceled')
+               || subs.data.find(x => x.status !== 'canceled')
+               || subs.data[0];
+      if (bio) subId = bio.id;
     } catch (e) {
       console.warn('⚠️  No se pudo listar suscripciones por customer:', e.message);
     }
