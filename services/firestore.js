@@ -7,6 +7,20 @@ import { db, FieldValue, Timestamp } from '../config/firebase.js';
 import { SOURCE } from '../config/stripe.js';
 
 // ───────────────────────────────────────────────────────────────
+// MODIFICADO · /config/club · precios EDITABLES (patrón SYNOVA)
+// La única fuente de verdad del precio: la edita vip-admin.html y
+// la leen vip-auth, vip-panel, index y ESTE webhook para armar el
+// cobro real en Stripe con price_data dinámico.
+// ───────────────────────────────────────────────────────────────
+export async function leerPreciosConfig() {
+  const snap = await db.collection('config').doc('club').get();
+  const c = snap.exists ? snap.data() : {};
+  const precioMes = Number(c.precioMes) > 0 ? Number(c.precioMes) : 199;
+  const precioAno = Number(c.precioAno) > 0 ? Number(c.precioAno) : 1999;
+  return { precioMes, precioAno };
+}
+
+// ───────────────────────────────────────────────────────────────
 // /miembros · CRUD
 // ───────────────────────────────────────────────────────────────
 

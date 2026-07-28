@@ -6,7 +6,8 @@
 import { stripe, STRIPE_CONFIG, SOURCE } from '../config/stripe.js';
 import {
   upsertMiembro, updateMiembroBySubscription, registrarPago,
-  buscarMiembro, marcarCancelacionProgramada, marcarReactivacion
+  buscarMiembro, marcarCancelacionProgramada, marcarReactivacion,
+  leerPreciosConfig
 } from './firestore.js';
 import { enviarBienvenida } from './email.js';
 
@@ -138,21 +139,36 @@ export async function handleInvoiceFailed(invoice) {
 // ───────────────────────────────────────────────────────────────
 // Crear sesión de Embedded Checkout (con cupones)
 // ───────────────────────────────────────────────────────────────
+// MODIFICADO (patrón SYNOVA): en vez de un Price ID fijo, arma el precio en
+// el momento leyendo config/club — cambiar el precio en vip-admin cambia el
+// cobro real desde la siguiente suscripción, sin tocar Stripe ni Railway.
 export async function createCheckoutSession({ plan, uid, email }) {
   if (!['mensual', 'anual'].includes(plan)) {
     throw new Error('Plan inválido (debe ser mensual o anual)');
   }
-  const price = plan === 'mensual' ? STRIPE_CONFIG.priceMensual : STRIPE_CONFIG.priceAnual;
-  if (!price) throw new Error('Stripe price IDs no configurados');
+  const { precioMes, precioAno } = await leerPreciosConfig();
+  const montoMXN = plan === 'mensual' ? precioMes : precioAno;
+  const interval = plan === 'mensual' ? 'month' : 'year';
 
   const session = await stripe.checkout.sessions.create({
     ui_mode: 'embedded',
     mode: 'subscription',
-    line_items: [{ price, quantity: 1 }],
+    line_items: [{
+      price_data: {
+        currency: 'mxn',
+        unit_amount: Math.round(montoMXN * 100),
+        recurring: { interval },
+        product_data: {
+          name: `BioNova VIP · Plan ${plan === 'mensual' ? 'Mensual' : 'Anual'}`,
+          metadata: { plan, source: SOURCE }
+        }
+      },
+      quantity: 1
+    }],
     allow_promotion_codes: true,                       // campo de cupón en el checkout
     client_reference_id: uid || undefined,
     customer_email: email || undefined,
-    metadata: { plan, uid: uid || '', source: SOURCE }, // ← marca de proyecto
+    metadata: { plan, uid: uid || '', source: SOURCE, precioAlCobrar: String(montoMXN) }, // ← marca de proyecto
     subscription_data: {
       metadata: { plan, uid: uid || '', source: SOURCE }
     },
@@ -179,6 +195,10 @@ export async function retrieveSession(sessionId) {
 // ¿Esta suscripción es de BioNova? Por etiqueta source O por su precio.
 // (La cuenta de Stripe es compartida entre consultoras; con cupón 100% el
 //  metadata.source puede no quedar, así que el precio es el identificador firme.)
+// NOTA MIGRACIÓN: las suscripciones nuevas usan price_data dinámico (sin Price
+// ID fijo) pero SIEMPRE llevan metadata.source en subscription_data, así que
+// pasan por la primera condición. El chequeo por Price ID queda solo para
+// suscripciones viejas creadas antes de la migración.
 function esSubBionova(s) {
   if ((s.metadata?.source || '') === SOURCE) return true;
   const ids = [STRIPE_CONFIG.priceMensual, STRIPE_CONFIG.priceAnual].filter(Boolean);
