@@ -6,13 +6,18 @@
 const REQUIRED = [
   'STRIPE_SECRET_KEY',
   'STRIPE_WEBHOOK_SECRET',
-  'STRIPE_PRICE_MENSUAL',
-  'STRIPE_PRICE_ANUAL',
   'FIREBASE_PROJECT_ID',
   'FIREBASE_SERVICE_ACCOUNT'
 ];
 
+// MODIFICADO: STRIPE_PRICE_MENSUAL/ANUAL pasaron a OPCIONALES.
+// El checkout ya NO los usa (precio dinámico desde Firestore config/club,
+// patrón SYNOVA). Solo sirven para identificar suscripciones VIEJAS que se
+// crearon con esos Price IDs (esSubBionova) — déjalas en Railway mientras
+// existan suscriptores anteriores a la migración; no crees nuevas.
 const OPTIONAL = [
+  'STRIPE_PRICE_MENSUAL',
+  'STRIPE_PRICE_ANUAL',
   'NEWSDATA_API_KEY',
   'RESEND_API_KEY',
   'MAIL_FROM',
