@@ -28,6 +28,7 @@ import membershipRoutes from './routes/membership.js';
 import newsRoutes from './routes/news.js';
 import healthRoutes from './routes/health.js';
 import adminRoutes from './routes/admin.js';
+import bunnyRoutes from './routes/bunny.js';
 
 // Cron
 import { syncNewsData } from './services/news.js';
@@ -44,6 +45,7 @@ app.use(express.json());
 app.use('/membership', membershipRoutes);
 app.use('/noticias', newsRoutes);
 app.use('/admin', adminRoutes);
+app.use('/api/bunny', bunnyRoutes);
 app.use('/', healthRoutes);
 
 // Cron: todos los días 7am CDMX (= 13:00 UTC)
@@ -65,6 +67,7 @@ app.listen(env.port, () => {
   console.log('     POST /admin/activar-manual          · activa/regala (admin)');
   console.log('     POST /admin/cancelar-stripe         · cancela suscripción (admin)');
   console.log('     POST /admin/eliminar-miembro        · borra miembro (admin)');
+  console.log('     POST /api/bunny/embed-token         · reproductor Bunny protegido');
   console.log('     GET  /noticias/sync?secret=         · cron manual');
   console.log('     GET  /test-correo?to=               · prueba de correo');
   console.log('     GET  /health                        · health check');

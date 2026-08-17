@@ -23,6 +23,9 @@ const OPTIONAL = [
   'MAIL_FROM',
   'CRON_SECRET',
   'PANEL_URL',
+  'BUNNY_STREAM_LIBRARY_ID',
+  'BUNNY_TOKEN_AUTH_KEY',
+  'BUNNY_TOKEN_TTL_SECONDS',
   'PORT'
 ];
 
@@ -55,5 +58,8 @@ export const env = {
   mailFrom: process.env.MAIL_FROM || 'BioNova <noreply@bionovamexico.com>',
   cronSecret: process.env.CRON_SECRET || 'bionova-secret-britney-2026',
   panelUrl: process.env.PANEL_URL || 'https://www.bionovamexico.com',
+  bunnyStreamLibraryId: process.env.BUNNY_STREAM_LIBRARY_ID || '730368',
+  bunnyTokenAuthKey: process.env.BUNNY_TOKEN_AUTH_KEY || '',
+  bunnyTokenTtlSeconds: Math.min(900, Math.max(60, parseInt(process.env.BUNNY_TOKEN_TTL_SECONDS || '300', 10) || 300)),
   port: parseInt(process.env.PORT || '3000', 10)
 };
