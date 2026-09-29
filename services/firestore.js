@@ -6,6 +6,26 @@
 import { db, FieldValue, Timestamp } from '../config/firebase.js';
 import { SOURCE } from '../config/stripe.js';
 
+export function fechaMembresia(valor) {
+  if (!valor) return null;
+  if (typeof valor.toDate === 'function') return valor.toDate();
+  if (valor instanceof Date) return valor;
+  const fecha = new Date(valor);
+  return Number.isNaN(fecha.getTime()) ? null : fecha;
+}
+
+export function fechaVigenciaMembresia(data = {}) {
+  const canceladaAlFinal = data.cancelaAlFinal === true ||
+    (data.cancelaAlFinal == null && data.cancelacionProgramada === true);
+  if (canceladaAlFinal) {
+    return fechaMembresia(data.fechaFinAcceso || data.fechaProximaRenovacion || data.expiraEn);
+  }
+  if (data.stripeSubscriptionId) {
+    return fechaMembresia(data.fechaProximaRenovacion || data.expiraEn);
+  }
+  return fechaMembresia(data.expiraEn || data.fechaFinAcceso || data.fechaProximaRenovacion);
+}
+
 // ───────────────────────────────────────────────────────────────
 // MODIFICADO · /config/club · precios EDITABLES (patrón SYNOVA)
 // La única fuente de verdad del precio: la edita vip-admin.html y
@@ -44,6 +64,9 @@ export async function upsertMiembro({
     stripeCustomerId: customerId || null,
     stripeSubscriptionId: subscriptionId || null,
     cancelaAlFinal: false,
+    cancelacionProgramada: false,
+    fechaFinAcceso: null,
+    expiraEn: null,
     fechaAlta: FieldValue.serverTimestamp(),
     fechaProximaRenovacion: periodoFin ? Timestamp.fromDate(periodoFin) : null,
     updatedAt: FieldValue.serverTimestamp()
@@ -75,16 +98,18 @@ export async function updateMiembroBySubscription(subscriptionId, changes) {
  * Considera vigencia: si expiraEn ya pasó (regalos/activación manual), no está activa.
  */
 export async function getMembership(uid) {
-  const doc = await db.collection('miembros').doc(uid).get();
+  const ref = db.collection('miembros').doc(uid);
+  const doc = await ref.get();
   if (!doc.exists) return { activa: false, activo: false, motivo: 'sin-membresia' };
 
   const data = doc.data();
-  let activa = !!data.activa;
-
-  // Vigencia para regalos / activación manual (tienen expiraEn pero no suscripción Stripe)
-  const expira = data.expiraEn?.toDate?.();
-  if (activa && expira && expira.getTime() < Date.now()) {
-    activa = false;
+  const marcadaActiva = data.activa === true || data.activo === true || data.esRegalo === true;
+  const expira = fechaVigenciaMembresia(data);
+  const activa = marcadaActiva && (!expira || expira.getTime() > Date.now());
+  const canceladaAlFinal = data.cancelaAlFinal === true ||
+    (data.cancelaAlFinal == null && data.cancelacionProgramada === true);
+  if (data.stripeSubscriptionId && !canceladaAlFinal && data.fechaFinAcceso) {
+    await ref.set({ fechaFinAcceso: null, updatedAt: FieldValue.serverTimestamp() }, { merge: true });
   }
 
   return {
@@ -93,9 +118,13 @@ export async function getMembership(uid) {
     plan: data.plan || null,
     esRegalo: !!data.esRegalo,
     estado: data.estado || null,
-    cancelaAlFinal: !!data.cancelaAlFinal,
+    cancelaAlFinal: canceladaAlFinal,
+    cancelacionProgramada: canceladaAlFinal,
     proximaRenovacion: data.fechaProximaRenovacion?.toDate?.()?.toISOString() || null,
-    expiraEn: expira ? expira.toISOString() : null
+    expiraEn: expira ? expira.toISOString() : null,
+    fechaFinAcceso: canceladaAlFinal
+      ? fechaMembresia(data.fechaFinAcceso)?.toISOString?.() || null
+      : null
   };
 }
 

@@ -83,7 +83,10 @@ export async function handleSubscriptionChange(subscription) {
     activa,
     estado: status,
     cancelaAlFinal: !!subscription.cancel_at_period_end,
+    cancelacionProgramada: !!subscription.cancel_at_period_end,
     fechaProximaRenovacion: subscription.current_period_end
+      ? new Date(subscription.current_period_end * 1000) : null,
+    fechaFinAcceso: subscription.cancel_at_period_end && subscription.current_period_end
       ? new Date(subscription.current_period_end * 1000) : null
   });
 
@@ -100,8 +103,17 @@ export async function handleSubscriptionChange(subscription) {
 // ───────────────────────────────────────────────────────────────
 export async function handleInvoicePaid(invoice) {
   if (!invoice.subscription) return;
-  // Solo registramos si la suscripción es nuestra (existe en miembros)
-  const docId = await updateMiembroBySubscription(invoice.subscription, {});
+  const sub = await stripe.subscriptions.retrieve(invoice.subscription).catch(() => null);
+  const docId = await updateMiembroBySubscription(invoice.subscription, sub ? {
+    activa: ['active', 'trialing'].includes(sub.status),
+    estado: sub.status,
+    cancelaAlFinal: sub.cancel_at_period_end === true,
+    cancelacionProgramada: sub.cancel_at_period_end === true,
+    fechaProximaRenovacion: sub.current_period_end
+      ? new Date(sub.current_period_end * 1000) : null,
+    fechaFinAcceso: sub.cancel_at_period_end && sub.current_period_end
+      ? new Date(sub.current_period_end * 1000) : null
+  } : {});
   if (!docId) { console.log('⏭️  Invoice de otro proyecto · ignorado'); return; }
 
   await registrarPago({
