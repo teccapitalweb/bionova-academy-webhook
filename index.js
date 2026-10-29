@@ -29,6 +29,7 @@ import newsRoutes from './routes/news.js';
 import healthRoutes from './routes/health.js';
 import adminRoutes from './routes/admin.js';
 import bunnyRoutes from './routes/bunny.js';
+import activityRoutes from './routes/activity.js';
 
 // Cron
 import { syncNewsData } from './services/news.js';
@@ -46,6 +47,7 @@ app.use('/membership', membershipRoutes);
 app.use('/noticias', newsRoutes);
 app.use('/admin', adminRoutes);
 app.use('/api/bunny', bunnyRoutes);
+app.use('/activity', activityRoutes);
 app.use('/', healthRoutes);
 
 // Cron: todos los días 7am CDMX (= 13:00 UTC)
