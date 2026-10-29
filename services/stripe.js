@@ -10,6 +10,49 @@ import {
   leerPreciosConfig
 } from './firestore.js';
 import { enviarBienvenida } from './email.js';
+import crypto from 'node:crypto';
+
+const STRIPE_SUBSCRIPTION_BLOCKING_STATUSES = new Set([
+  'incomplete', 'active', 'trialing', 'past_due', 'unpaid', 'paused'
+]);
+
+function stripeId(value) {
+  return typeof value === 'string' ? value : (value && typeof value.id === 'string' ? value.id : '');
+}
+
+function checkoutIdentityKey(email, uid) {
+  const identity = String(email || uid || '').trim().toLowerCase();
+  return crypto.createHash('sha256').update(identity).digest('hex').slice(0, 24);
+}
+
+function subscriptionPeriodEnd(subscription) {
+  const direct = Number(subscription?.current_period_end);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  return Math.max(0, ...(subscription?.items?.data || []).map(item => Number(item?.current_period_end) || 0));
+}
+
+function invoiceSubscriptionId(invoice) {
+  return stripeId(invoice?.subscription)
+    || stripeId(invoice?.parent?.subscription_details?.subscription);
+}
+
+async function listarSuscripcionesStripeBionova(email, customerIds = [], knownSubscriptionIds = []) {
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const ids = new Set((customerIds || []).map(stripeId).filter(Boolean));
+  const knownIds = new Set((knownSubscriptionIds || []).map(stripeId).filter(Boolean));
+  if (normalizedEmail) {
+    const customers = await stripe.customers.list({ email: normalizedEmail, limit: 20 });
+    (customers.data || []).forEach(customer => ids.add(customer.id));
+  }
+  const matches = new Map();
+  for (const customerId of ids) {
+    const list = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 100 });
+    (list.data || []).forEach(subscription => {
+      if (esSubBionova(subscription) || knownIds.has(subscription.id)) matches.set(subscription.id, subscription);
+    });
+  }
+  return Array.from(matches.values());
+}
 
 // ───────────────────────────────────────────────────────────────
 // checkout.session.completed → activa la membresía en Firestore.
@@ -53,7 +96,8 @@ export async function handleCheckoutCompleted(session) {
   if (subscriptionId) {
     try {
       const sub = await stripe.subscriptions.retrieve(subscriptionId);
-      periodoFin = new Date(sub.current_period_end * 1000);
+      const periodEndSeconds = subscriptionPeriodEnd(sub);
+      if (periodEndSeconds) periodoFin = new Date(periodEndSeconds * 1000);
     } catch (e) {
       console.warn('⚠️  No pudimos obtener detalles de suscripción:', e.message);
     }
@@ -78,16 +122,18 @@ export async function handleSubscriptionChange(subscription) {
   const subId = subscription.id;
   const status = subscription.status;
   const activa = ['active', 'trialing'].includes(status);
+  const periodEndSeconds = subscriptionPeriodEnd(subscription);
 
   const docId = await updateMiembroBySubscription(subId, {
     activa,
+    activo: activa,
     estado: status,
     cancelaAlFinal: !!subscription.cancel_at_period_end,
     cancelacionProgramada: !!subscription.cancel_at_period_end,
-    fechaProximaRenovacion: subscription.current_period_end
-      ? new Date(subscription.current_period_end * 1000) : null,
-    fechaFinAcceso: subscription.cancel_at_period_end && subscription.current_period_end
-      ? new Date(subscription.current_period_end * 1000) : null
+    fechaProximaRenovacion: periodEndSeconds
+      ? new Date(periodEndSeconds * 1000) : null,
+    fechaFinAcceso: subscription.cancel_at_period_end && periodEndSeconds
+      ? new Date(periodEndSeconds * 1000) : null
   });
 
   if (!docId) {
@@ -102,23 +148,54 @@ export async function handleSubscriptionChange(subscription) {
 // invoice.payment_succeeded / failed
 // ───────────────────────────────────────────────────────────────
 export async function handleInvoicePaid(invoice) {
-  if (!invoice.subscription) return;
-  const sub = await stripe.subscriptions.retrieve(invoice.subscription).catch(() => null);
-  const docId = await updateMiembroBySubscription(invoice.subscription, sub ? {
+  const subscriptionId = invoiceSubscriptionId(invoice);
+  if (!subscriptionId) return;
+  const sub = await stripe.subscriptions.retrieve(subscriptionId).catch(() => null);
+  if (!sub || !esSubBionova(sub)) {
+    console.log('⏭️  Invoice de otro proyecto · ignorado');
+    return;
+  }
+  const periodEndSeconds = subscriptionPeriodEnd(sub);
+  const changes = sub ? {
     activa: ['active', 'trialing'].includes(sub.status),
+    activo: ['active', 'trialing'].includes(sub.status),
     estado: sub.status,
     cancelaAlFinal: sub.cancel_at_period_end === true,
     cancelacionProgramada: sub.cancel_at_period_end === true,
-    fechaProximaRenovacion: sub.current_period_end
-      ? new Date(sub.current_period_end * 1000) : null,
-    fechaFinAcceso: sub.cancel_at_period_end && sub.current_period_end
-      ? new Date(sub.current_period_end * 1000) : null
-  } : {});
+    fechaProximaRenovacion: periodEndSeconds
+      ? new Date(periodEndSeconds * 1000) : null,
+    fechaFinAcceso: sub.cancel_at_period_end && periodEndSeconds
+      ? new Date(periodEndSeconds * 1000) : null
+  } : {};
+  let docId = await updateMiembroBySubscription(subscriptionId, changes);
+  if (!docId && sub) {
+    const uid = String(sub.metadata?.uid || '');
+    const email = String(invoice.customer_email || '').trim().toLowerCase();
+    const hit = await buscarMiembro({ uid, email });
+    if (hit) {
+      await hit.ref.set({
+        ...changes,
+        stripeSubscriptionId: subscriptionId,
+        stripeCustomerId: stripeId(invoice.customer || sub.customer),
+        updatedAt: new Date()
+      }, { merge: true });
+      docId = hit.ref.id;
+    } else if ((uid || email) && changes.activa) {
+      docId = await upsertMiembro({
+        uid,
+        email,
+        plan: sub.metadata?.plan || 'mensual',
+        customerId: stripeId(invoice.customer || sub.customer),
+        subscriptionId,
+        periodoFin: periodEndSeconds ? new Date(periodEndSeconds * 1000) : null
+      });
+    }
+  }
   if (!docId) { console.log('⏭️  Invoice de otro proyecto · ignorado'); return; }
 
   await registrarPago({
     invoiceId: invoice.id,
-    subscriptionId: invoice.subscription,
+    subscriptionId,
     customerId: invoice.customer,
     email: invoice.customer_email,
     monto: (invoice.amount_paid || 0) / 100,
@@ -131,13 +208,14 @@ export async function handleInvoicePaid(invoice) {
 }
 
 export async function handleInvoiceFailed(invoice) {
-  if (!invoice.subscription) return;
-  const docId = await updateMiembroBySubscription(invoice.subscription, {});
+  const subscriptionId = invoiceSubscriptionId(invoice);
+  if (!subscriptionId) return;
+  const docId = await updateMiembroBySubscription(subscriptionId, {});
   if (!docId) return;
 
   await registrarPago({
     invoiceId: invoice.id,
-    subscriptionId: invoice.subscription,
+    subscriptionId,
     customerId: invoice.customer,
     email: invoice.customer_email,
     monto: (invoice.amount_due || 0) / 100,
@@ -161,6 +239,24 @@ export async function createCheckoutSession({ plan, uid, email }) {
   const { precioMes, precioAno } = await leerPreciosConfig();
   const montoMXN = plan === 'mensual' ? precioMes : precioAno;
   const interval = plan === 'mensual' ? 'month' : 'year';
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  const memberHit = await buscarMiembro({ uid, email: normalizedEmail });
+  const subscriptions = await listarSuscripcionesStripeBionova(
+    normalizedEmail,
+    [memberHit?.data?.stripeCustomerId, memberHit?.data?.customerId],
+    [memberHit?.data?.stripeSubscriptionId, memberHit?.data?.subscriptionId]
+  );
+  const blockingSubscriptions = subscriptions.filter(subscription => (
+    STRIPE_SUBSCRIPTION_BLOCKING_STATUSES.has(subscription.status)
+  ));
+  if (blockingSubscriptions.length) {
+    const error = new Error('Ya existe una suscripción de BioNova en Stripe. No abrimos otro cobro.');
+    error.statusCode = 409;
+    error.code = blockingSubscriptions.length > 1
+      ? 'duplicate-subscriptions-detected'
+      : 'subscription-already-exists';
+    throw error;
+  }
 
   const session = await stripe.checkout.sessions.create({
     ui_mode: 'embedded',
@@ -179,7 +275,7 @@ export async function createCheckoutSession({ plan, uid, email }) {
     }],
     allow_promotion_codes: true,                       // campo de cupón en el checkout
     client_reference_id: uid || undefined,
-    customer_email: email || undefined,
+    customer_email: normalizedEmail || undefined,
     metadata: { plan, uid: uid || '', source: SOURCE, precioAlCobrar: String(montoMXN) }, // ← marca de proyecto
     subscription_data: {
       metadata: { plan, uid: uid || '', source: SOURCE }
@@ -187,13 +283,24 @@ export async function createCheckoutSession({ plan, uid, email }) {
     return_url: `${STRIPE_CONFIG.panelUrl}/vip-panel.html?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
     locale: 'es-419',
     payment_method_types: ['card']
+  }, {
+    idempotencyKey: `bionova-checkout-v3-${checkoutIdentityKey(normalizedEmail, uid)}-${plan}-${new Date().toISOString().slice(0, 10)}`
   });
 
   return { clientSecret: session.client_secret, sessionId: session.id };
 }
 
-export async function retrieveSession(sessionId) {
+export async function retrieveSession(sessionId, identity = {}) {
   const s = await stripe.checkout.sessions.retrieve(sessionId);
+  const ownerUid = String(s.client_reference_id || s.metadata?.uid || '');
+  const ownerEmail = String(s.customer_details?.email || s.customer_email || '').trim().toLowerCase();
+  const requesterUid = String(identity.uid || '');
+  const requesterEmail = String(identity.email || '').trim().toLowerCase();
+  if (!requesterUid || (ownerUid ? ownerUid !== requesterUid : (!requesterEmail || ownerEmail !== requesterEmail))) {
+    const error = new Error('No autorizado para consultar esta sesión');
+    error.statusCode = 403;
+    throw error;
+  }
   return {
     status: s.status,
     payment_status: s.payment_status,
@@ -258,8 +365,9 @@ export async function cancelarSuscripcion({ uid, email }) {
 
   const sub = await stripe.subscriptions.update(subId, { cancel_at_period_end: true });
 
-  const finAcceso = sub.current_period_end
-    ? new Date(sub.current_period_end * 1000)
+  const periodEndSeconds = subscriptionPeriodEnd(sub);
+  const finAcceso = periodEndSeconds
+    ? new Date(periodEndSeconds * 1000)
     : (miembro.data.fechaProximaRenovacion?.toDate?.() || null);
 
   await marcarCancelacionProgramada(miembro.ref, finAcceso);
@@ -279,8 +387,9 @@ export async function reactivarSuscripcion({ uid, email }) {
   const sub = await stripe.subscriptions.update(subId, { cancel_at_period_end: false });
   await marcarReactivacion(miembro.ref);
 
-  const proxRenov = sub.current_period_end
-    ? new Date(sub.current_period_end * 1000).toISOString() : null;
+  const periodEndSeconds = subscriptionPeriodEnd(sub);
+  const proxRenov = periodEndSeconds
+    ? new Date(periodEndSeconds * 1000).toISOString() : null;
   return { reactivada: true, proximaRenovacion: proxRenov };
 }
 
@@ -318,6 +427,7 @@ export async function processWebhookEvent(event) {
     case 'customer.subscription.updated':
     case 'customer.subscription.deleted':
       await handleSubscriptionChange(event.data.object); break;
+    case 'invoice.paid':
     case 'invoice.payment_succeeded':
       await handleInvoicePaid(event.data.object); break;
     case 'invoice.payment_failed':
